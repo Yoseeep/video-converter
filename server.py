@@ -241,10 +241,37 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
     """Manejador HTTP para la interfaz web y APIs REST."""
 
     def log_message(self, format, *args):
-        # Desactivar logs ruidosos para polling continuo
-        if "GET /api/tasks" in args[0]:
-            return
+        try:
+            # Desactivar logs ruidosos para polling continuo y comprobar tipo seguro
+            if args and isinstance(args[0], str) and "GET /api/tasks" in args[0]:
+                return
+        except Exception:
+            pass
         super().log_message(format, *args)
+
+    def do_HEAD(self):
+        """Soporte para peticiones HEAD (usadas habitualmente por health checks de Render, Railway, etc.)."""
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        if path in ["/", "/index.html", "/health", "/healthz"]:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+        elif path.startswith("/static/"):
+            rel_path = path[len("/static/"):]
+            file_path = (STATIC_DIR / rel_path).resolve()
+            if str(file_path).startswith(str(STATIC_DIR.resolve())) and file_path.exists():
+                ext = file_path.suffix.lower()
+                mime = MIME_TYPES.get(ext, "application/octet-stream")
+                self.send_response(200)
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(file_path.stat().st_size))
+                self.end_headers()
+            else:
+                self.send_error(404, "Archivo no encontrado")
+        else:
+            self.send_response(200)
+            self.end_headers()
 
     def send_json(self, data, status=200):
         encoded = json.dumps(data).encode("utf-8")
@@ -258,6 +285,10 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+
+        if path in ["/health", "/healthz"]:
+            self.send_json({"status": "ok"})
+            return
 
         if path == "/" or path == "/index.html":
             self.serve_file(TEMPLATES_DIR / "index.html", "text/html; charset=utf-8")
