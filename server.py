@@ -2,6 +2,7 @@
 """
 Servidor web de conversión de video multi-archivo con FFmpeg.
 Desarrollado en Python puro (librería estándar, sin dependencias externas).
+Optimizado para bajo consumo de RAM/CPU en entornos como Render, Railway y VPS.
 """
 
 import os
@@ -24,16 +25,18 @@ UPLOADS_DIR = BASE_DIR / "uploads"
 CONVERTED_DIR = BASE_DIR / "converted"
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATES_DIR = BASE_DIR / "templates"
+TASKS_FILE = UPLOADS_DIR / "tasks.json"
 
 UPLOADS_DIR.mkdir(exist_ok=True)
 CONVERTED_DIR.mkdir(exist_ok=True)
 
-# Estado de tareas en memoria (protegido por un lock)
-tasks_lock = threading.Lock()
+# Estado de tareas en memoria (protegido por un RLock reentrante)
+tasks_lock = threading.RLock()
 tasks = {}
 
-# Pool de conversión con hilos (2 conversiones simultáneas para rendimiento balanceado)
-conversion_executor = ThreadPoolExecutor(max_workers=2)
+# 1 conversión simultánea para no saturar memoria RAM en Render (límite 512MB)
+MAX_WORKERS = int(os.environ.get("MAX_CONVERSIONS", 1))
+conversion_executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
 
 MIME_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -55,6 +58,40 @@ MIME_TYPES = {
     ".zip": "application/zip",
 }
 
+def save_tasks_to_disk():
+    """Persiste el estado de las tareas en disco para resistir reinicios del contenedor."""
+    try:
+        with tasks_lock:
+            data = list(tasks.values())
+        tmp_file = UPLOADS_DIR / "tasks.json.tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp_file.replace(TASKS_FILE)
+    except Exception as e:
+        print(f"[Storage] Error guardando tareas: {e}", file=sys.stderr)
+
+def load_tasks_from_disk():
+    """Recupera tareas guardadas al reiniciar el servidor."""
+    if not TASKS_FILE.exists():
+        return
+    try:
+        with open(TASKS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        with tasks_lock:
+            for item in data:
+                # Si el contenedor se reinició durante la conversión o subida
+                if item.get("status") in ["converting", "uploading"]:
+                    if Path(item.get("input_path", "")).exists():
+                        item["status"] = "queued"
+                        item["progress"] = 0
+                    else:
+                        item["status"] = "error"
+                        item["error_message"] = "Archivo no disponible tras reinicio"
+                tasks[item["id"]] = item
+        print(f"[Storage] Cargadas {len(data)} tareas guardadas previamente.")
+    except Exception as e:
+        print(f"[Storage] Error cargando tareas de disco: {e}", file=sys.stderr)
+
 def get_media_duration(file_path):
     """Obtiene la duración del archivo en segundos usando ffprobe."""
     try:
@@ -73,9 +110,12 @@ def get_media_duration(file_path):
     return None
 
 def build_ffmpeg_cmd(input_path, output_path, target_format, options):
-    """Genera la lista de argumentos para FFmpeg según formato y opciones."""
+    """
+    Genera la lista de argumentos para FFmpeg según formato y opciones.
+    Optimizado con '-threads 2', '-preset veryfast' y buffers ajustados para no exceder 512MB RAM.
+    """
     target_format = target_format.lower()
-    quality = options.get("quality", "normal")       # high, normal, fast
+    quality = options.get("quality", "normal")       # high, normal, compact
     resolution = options.get("resolution", "original") # original, 1080p, 720p, 480p
     audio_mode = options.get("audio", "default")      # default, mute, copy
 
@@ -87,7 +127,8 @@ def build_ffmpeg_cmd(input_path, output_path, target_format, options):
     }
     crf = crf_map.get(quality, "23")
 
-    cmd = ["ffmpeg", "-y", "-i", str(input_path)]
+    # Limitar hilos a 2 en decodificación para evitar picos de memoria en la nube
+    cmd = ["ffmpeg", "-y", "-threads", "2", "-i", str(input_path)]
 
     # Filtros de video
     video_filters = []
@@ -102,44 +143,73 @@ def build_ffmpeg_cmd(input_path, output_path, target_format, options):
     if audio_mode == "mute":
         cmd.append("-an")
 
-    # Configuración por formato de destino
+    # Configuración por formato de destino con presets ligeros
     if target_format == "mp4":
-        cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", crf, "-pix_fmt", "yuv420p"])
+        cmd.extend([
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", crf,
+            "-pix_fmt", "yuv420p",
+            "-threads", "2",
+            "-x264-params", "rc-lookahead=10:sync-lookahead=10:threads=2",
+            "-max_muxing_queue_size", "1024"
+        ])
         if audio_mode != "mute":
             cmd.extend(["-c:a", "aac", "-b:a", "192k"])
         cmd.extend(["-movflags", "+faststart"])
 
     elif target_format == "webm":
-        cmd.extend(["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "30"])
+        cmd.extend([
+            "-c:v", "libvpx-vp9",
+            "-b:v", "0",
+            "-crf", "30",
+            "-threads", "2",
+            "-speed", "4",
+            "-tile-columns", "1",
+            "-max_muxing_queue_size", "1024"
+        ])
         if audio_mode != "mute":
             cmd.extend(["-c:a", "libopus", "-b:a", "128k"])
 
     elif target_format == "mkv":
-        cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", crf])
+        cmd.extend([
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", crf,
+            "-threads", "2",
+            "-x264-params", "rc-lookahead=10:sync-lookahead=10:threads=2",
+            "-max_muxing_queue_size", "1024"
+        ])
         if audio_mode != "mute":
             cmd.extend(["-c:a", "aac", "-b:a", "192k"])
 
     elif target_format == "avi":
-        cmd.extend(["-c:v", "mpeg4", "-qscale:v", "3"])
+        cmd.extend(["-c:v", "mpeg4", "-qscale:v", "3", "-threads", "2"])
         if audio_mode != "mute":
             cmd.extend(["-c:a", "libmp3lame", "-q:a", "2"])
 
     elif target_format == "mov":
-        cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", crf, "-pix_fmt", "yuv420p"])
+        cmd.extend([
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", crf,
+            "-pix_fmt", "yuv420p",
+            "-threads", "2",
+            "-x264-params", "rc-lookahead=10:sync-lookahead=10:threads=2",
+            "-max_muxing_queue_size", "1024"
+        ])
         if audio_mode != "mute":
             cmd.extend(["-c:a", "aac", "-b:a", "192k"])
 
     elif target_format in ["mpg", "mpeg"]:
-        cmd.extend(["-c:v", "mpeg2video", "-qscale:v", "3"])
+        cmd.extend(["-c:v", "mpeg2video", "-qscale:v", "3", "-threads", "2"])
         if audio_mode != "mute":
             cmd.extend(["-c:a", "mp2", "-b:a", "192k"])
 
     elif target_format == "gif":
         filter_str = "fps=15,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse"
-        cmd.extend(["-vf", filter_str])
-        # Sin audio para GIF
+        cmd.extend(["-vf", filter_str, "-threads", "2"])
         cmd.append("-an")
-        # Ya aplicamos filtros especiales en GIF
         video_filters = []
 
     elif target_format == "mp3":
@@ -152,14 +222,11 @@ def build_ffmpeg_cmd(input_path, output_path, target_format, options):
         cmd.extend(["-vn", "-c:a", "aac", "-b:a", "192k"])
 
     else:
-        # Formato genérico de fallback
-        cmd.extend(["-c:v", "libx264", "-c:a", "aac"])
+        cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-threads", "2", "-c:a", "aac"])
 
-    # Aplicar filtros acumulados si no es GIF
     if video_filters:
         cmd.extend(["-vf", ",".join(video_filters)])
 
-    # Pipe de progreso
     cmd.extend(["-progress", "pipe:1", "-nostats", str(output_path)])
     return cmd
 
@@ -172,6 +239,7 @@ def run_conversion_job(task_id):
         task["status"] = "converting"
         task["progress"] = 0
         task["started_at"] = time.time()
+        save_tasks_to_disk()
 
     input_path = Path(task["input_path"])
     output_path = Path(task["output_path"])
@@ -185,34 +253,43 @@ def run_conversion_job(task_id):
     cmd = build_ffmpeg_cmd(input_path, output_path, target_format, options)
     print(f"[FFmpeg] Iniciando conversión {task_id}: {' '.join(cmd)}")
 
+    err_file = UPLOADS_DIR / f"{task_id}.err"
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1
-        )
+        with open(err_file, "w", encoding="utf-8") as err_f:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=err_f,
+                text=True,
+                bufsize=1
+            )
 
-        for line in proc.stdout:
-            line = line.strip()
-            if line.startswith("out_time_us="):
-                try:
-                    time_us = int(line.split("=")[1])
-                    elapsed_seconds = time_us / 1_000_000.0
-                    if duration and duration > 0:
-                        pct = int((elapsed_seconds / duration) * 100)
-                        pct = max(0, min(99, pct))
-                        with tasks_lock:
-                            task["progress"] = pct
-                except Exception:
-                    pass
-            elif line.startswith("progress=") and line.endswith("end"):
-                with tasks_lock:
-                    task["progress"] = 100
+            for line in proc.stdout:
+                line = line.strip()
+                if line.startswith("out_time_us="):
+                    try:
+                        time_us = int(line.split("=")[1])
+                        elapsed_seconds = time_us / 1_000_000.0
+                        if duration and duration > 0:
+                            pct = int((elapsed_seconds / duration) * 100)
+                            pct = max(0, min(99, pct))
+                            with tasks_lock:
+                                task["progress"] = pct
+                    except Exception:
+                        pass
+                elif line.startswith("progress=") and line.endswith("end"):
+                    with tasks_lock:
+                        task["progress"] = 100
 
-        proc.wait()
-        _, stderr_err = proc.communicate()
+            proc.wait()
+
+        stderr_err = ""
+        if err_file.exists():
+            try:
+                stderr_err = err_file.read_text(encoding="utf-8", errors="ignore")
+                err_file.unlink(missing_ok=True)
+            except Exception:
+                pass
 
         if proc.returncode == 0 and output_path.exists():
             out_size = output_path.stat().st_size
@@ -223,17 +300,20 @@ def run_conversion_job(task_id):
                 task["completed_at"] = time.time()
                 elapsed = task["completed_at"] - task["started_at"]
                 task["elapsed_seconds"] = round(elapsed, 1)
+                save_tasks_to_disk()
             print(f"[FFmpeg] Conversión {task_id} finalizada exitosamente en {round(elapsed, 1)}s. Tamaño: {out_size} bytes.")
         else:
             with tasks_lock:
                 task["status"] = "error"
-                task["error_message"] = (stderr_err[-300:] if stderr_err else "Error desconocido durante la conversión FFmpeg").strip()
+                task["error_message"] = (stderr_err[-300:] if stderr_err else "Error durante la conversión FFmpeg").strip()
+                save_tasks_to_disk()
             print(f"[FFmpeg] Error en conversión {task_id}: {stderr_err}")
 
     except Exception as e:
         with tasks_lock:
             task["status"] = "error"
             task["error_message"] = str(e)
+            save_tasks_to_disk()
         print(f"[FFmpeg] Excepción en conversión {task_id}: {e}", file=sys.stderr)
 
 
@@ -325,7 +405,6 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
                 self.send_error(404, "Archivo físico no encontrado")
                 return
             filename = task["output_name"]
-            encoded_fn = urllib.parse.quote(filename)
             self.serve_download(out_path, filename=filename)
         elif path.startswith("/api/preview/"):
             task_id = path.split("/api/preview/")[1]
@@ -353,7 +432,8 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
             self.handle_clear_all()
         elif path.startswith("/api/convert/"):
             task_id = path.split("/api/convert/")[1]
-            self.handle_start_convert(task_id)
+            query_params = urllib.parse.parse_qs(parsed.query)
+            self.handle_start_convert(task_id, query_params)
         elif path == "/api/convert-all":
             self.handle_convert_all()
         else:
@@ -375,6 +455,7 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
                         os.remove(task["output_path"])
                 except Exception:
                     pass
+                save_tasks_to_disk()
                 self.send_json({"success": True, "task_id": task_id})
             else:
                 self.send_error(404, "Tarea no encontrada")
@@ -382,7 +463,7 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
             self.send_error(404, "Ruta DELETE no encontrada")
 
     def handle_upload(self):
-        """Maneja la subida de un archivo en streaming binario para máxima eficiencia y soporte de archivos grandes."""
+        """Maneja la subida de un archivo en streaming binario para máxima eficiencia."""
         try:
             content_length = int(self.headers.get("Content-Length", 0))
             raw_filename = self.headers.get("X-Filename", "video.mpg")
@@ -391,7 +472,8 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
             quality = self.headers.get("X-Quality", "normal")
             resolution = self.headers.get("X-Resolution", "original")
             audio = self.headers.get("X-Audio", "default")
-            auto_start = self.headers.get("X-Auto-Start", "true").lower() == "true"
+            # Por defecto NO auto-iniciar para permitir al usuario revisar y elegir formato
+            auto_start = self.headers.get("X-Auto-Start", "false").lower() == "true"
 
             # Sanitizar nombre de archivo
             safe_name = os.path.basename(filename).replace("/", "_").replace("\\", "_")
@@ -445,6 +527,7 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
 
             with tasks_lock:
                 tasks[task_id] = task_data
+            save_tasks_to_disk()
 
             if auto_start:
                 conversion_executor.submit(run_conversion_job, task_id)
@@ -455,18 +538,27 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
             print(f"[Upload Error]: {e}", file=sys.stderr)
             self.send_json({"success": False, "error": str(e)}, status=500)
 
-    def handle_start_convert(self, task_id):
+    def handle_start_convert(self, task_id, query_params=None):
         with tasks_lock:
             task = tasks.get(task_id)
             if not task:
                 self.send_error(404, "Tarea no encontrada")
                 return
-            if task["status"] in ["converting", "completed"]:
-                self.send_json({"success": True, "message": "Ya en proceso o completada"})
+            if query_params:
+                new_fmt = query_params.get("target", [None])[0]
+                if new_fmt:
+                    task["target_format"] = new_fmt.lower().strip()
+                    stem = Path(task["original_name"]).stem
+                    task["output_name"] = f"{stem}.{task['target_format']}"
+                    task["output_path"] = str(CONVERTED_DIR / f"{task_id}_{task['output_name']}")
+
+            if task["status"] == "converting":
+                self.send_json({"success": True, "message": "Ya en proceso"})
                 return
             task["status"] = "queued"
             task["progress"] = 0
             task["error_message"] = None
+            save_tasks_to_disk()
 
         conversion_executor.submit(run_conversion_job, task_id)
         self.send_json({"success": True, "task_id": task_id})
@@ -497,6 +589,7 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+        save_tasks_to_disk()
         self.send_json({"success": True, "message": "Historial limpiado"})
 
     def serve_file(self, file_path, content_type):
@@ -517,7 +610,6 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
             size = file_path.stat().st_size
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
-            # Soporte RFC 5987 para nombres UTF-8
             encoded_fn = urllib.parse.quote(filename)
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"; filename*=UTF-8\'\'{encoded_fn}')
             self.send_header("Content-Length", str(size))
@@ -529,7 +621,7 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
             print(f"[Download Error]: {e}", file=sys.stderr)
 
     def serve_zip_all(self):
-        """Genera un archivo ZIP al vuelo con todos los videos convertidos y lo envía al cliente."""
+        """Genera un archivo ZIP con todos los videos convertidos."""
         with tasks_lock:
             completed_tasks = [t for t in tasks.values() if t["status"] == "completed"]
 
@@ -565,6 +657,7 @@ def find_available_port(start_port=8080, max_attempts=20):
     return start_port
 
 def run_server(port=None):
+    load_tasks_from_disk()
     if port is None:
         port = find_available_port(8080)
     server_address = ("0.0.0.0", port)

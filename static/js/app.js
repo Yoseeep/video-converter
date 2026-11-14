@@ -18,6 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const globalAudio = document.getElementById('globalAudio');
   const toggleAdvancedBtn = document.getElementById('toggleAdvancedBtn');
   const advancedPanel = document.getElementById('advancedPanel');
+  const autoStartToggle = document.getElementById('autoStartToggle');
   const startAllBtn = document.getElementById('startAllBtn');
   const downloadZipBtn = document.getElementById('downloadZipBtn');
   const clearAllBtn = document.getElementById('clearAllBtn');
@@ -104,7 +105,7 @@ document.addEventListener('DOMContentLoaded', () => {
     toggleAdvancedBtn.classList.toggle('active', isAdvancedOpen);
   });
 
-  // Cambio de formato global: actualiza las tareas pendientes
+  // Cambio de formato global: actualiza las tareas pendientes en espera
   globalFormat.addEventListener('change', () => {
     const newTarget = globalFormat.value;
     Object.values(tasks).forEach(task => {
@@ -120,10 +121,16 @@ document.addEventListener('DOMContentLoaded', () => {
   startAllBtn.addEventListener('click', async () => {
     try {
       startAllBtn.disabled = true;
-      const res = await fetch('/api/convert-all', { method: 'POST' });
-      if (res.ok) {
-        startPolling();
+      const pendingTasks = Object.values(tasks).filter(t => t.status === 'queued' || t.status === 'error');
+      
+      // Enviar cada tarea con su formato seleccionado
+      for (const t of pendingTasks) {
+        await fetch(`/api/convert/${t.id}?target=${t.target_format}`, { method: 'POST' });
+        t.status = 'queued';
       }
+
+      renderUI();
+      startPolling();
     } catch (err) {
       console.error('Error al iniciar conversiones:', err);
     } finally {
@@ -163,6 +170,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const quality = globalQuality.value;
     const resolution = globalResolution.value;
     const audio = globalAudio.value;
+    const shouldAutoStart = autoStartToggle ? autoStartToggle.checked : false;
 
     // Crear tarea temporal local mientras sube
     tasks[tempId] = {
@@ -186,14 +194,15 @@ document.addEventListener('DOMContentLoaded', () => {
     xhr.setRequestHeader('X-Quality', quality);
     xhr.setRequestHeader('X-Resolution', resolution);
     xhr.setRequestHeader('X-Audio', audio);
-    xhr.setRequestHeader('X-Auto-Start', 'true');
+    // Solo iniciar automáticamente si el usuario activó la casilla
+    xhr.setRequestHeader('X-Auto-Start', shouldAutoStart ? 'true' : 'false');
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) {
         const pct = Math.round((e.loaded / e.total) * 100);
         if (tasks[tempId]) {
           tasks[tempId].upload_progress = pct;
-          updateCardProgress(tempId, pct, 'Subiendo...');
+          updateCardProgress(tempId, pct, 'Subiendo archivo...');
         }
       }
     };
@@ -206,7 +215,9 @@ document.addEventListener('DOMContentLoaded', () => {
             delete tasks[tempId];
             tasks[resp.task.id] = resp.task;
             renderUI();
-            startPolling();
+            if (shouldAutoStart) {
+              startPolling();
+            }
           }
         } catch (e) {
           console.error('Error parseando respuesta:', e);
@@ -223,7 +234,7 @@ document.addEventListener('DOMContentLoaded', () => {
     xhr.onerror = () => {
       if (tasks[tempId]) {
         tasks[tempId].status = 'error';
-        tasks[tempId].error_message = 'Error de red durante la subida';
+        tasks[tempId].error_message = 'Error de conexión durante la subida';
         renderUI();
       }
     };
@@ -231,11 +242,11 @@ document.addEventListener('DOMContentLoaded', () => {
     xhr.send(file);
   }
 
-  // Polling continuo del estado de las tareas
+  // Polling continuo solo mientras haya conversiones activas
   function startPolling() {
     if (pollInterval) return;
     pollTasks();
-    pollInterval = setInterval(pollTasks, 800);
+    pollInterval = setInterval(pollTasks, 900);
   }
 
   function stopPolling() {
@@ -251,28 +262,33 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!res.ok) return;
       const data = await res.json();
       
-      let hasActiveJobs = false;
-      const updatedTasks = {};
+      let hasActiveConversion = false;
+      const serverTasks = {};
 
       data.tasks.forEach(t => {
-        updatedTasks[t.id] = t;
-        if (t.status === 'converting' || t.status === 'queued') {
-          hasActiveJobs = true;
+        serverTasks[t.id] = t;
+        if (t.status === 'converting') {
+          hasActiveConversion = true;
         }
       });
 
-      // Conservar las que aún estén en estado 'uploading' local
+      // Conservar las que aún estén en estado 'uploading' en cliente
       Object.keys(tasks).forEach(id => {
-        if (tasks[id].status === 'uploading') {
-          updatedTasks[id] = tasks[id];
-          hasActiveJobs = true;
+        if (tasks[id].status === 'uploading' && !serverTasks[id]) {
+          serverTasks[id] = tasks[id];
+        } else if (serverTasks[id] && tasks[id]) {
+          // Si el usuario cambió el formato en el selector antes de convertir, conservarlo
+          if (serverTasks[id].status === 'queued' && tasks[id].target_format) {
+            serverTasks[id].target_format = tasks[id].target_format;
+          }
         }
       });
 
-      tasks = updatedTasks;
+      tasks = serverTasks;
       renderUI();
 
-      if (!hasActiveJobs) {
+      // Si no hay ninguna tarea convirtiendo activamente, pausar sondeo
+      if (!hasActiveConversion) {
         stopPolling();
       }
     } catch (err) {
@@ -418,8 +434,8 @@ document.addEventListener('DOMContentLoaded', () => {
       errorBox.style.display = 'none';
 
     } else if (task.status === 'queued') {
-      statusText.innerHTML = `<span>En cola de conversión</span>`;
-      pctText.textContent = `Listo`;
+      statusText.innerHTML = `<span>Listo para convertir</span>`;
+      pctText.textContent = `En espera`;
       progressFill.style.width = `0%`;
       statusIndicator.innerHTML = `<span class="status-badge status-queued">En espera</span>`;
       actionsBox.innerHTML = `
@@ -521,7 +537,14 @@ document.addEventListener('DOMContentLoaded', () => {
   // Funciones globales expuestas al DOM (para los botones onclick)
   window.startSingleConvert = async (taskId) => {
     try {
-      await fetch(`/api/convert/${taskId}`, { method: 'POST' });
+      const task = tasks[taskId];
+      const target = task ? task.target_format : 'mp4';
+      await fetch(`/api/convert/${taskId}?target=${target}`, { method: 'POST' });
+      if (tasks[taskId]) {
+        tasks[taskId].status = 'converting';
+        tasks[taskId].progress = 0;
+        renderUI();
+      }
       startPolling();
     } catch (err) {
       console.error('Error al convertir tarea individual:', err);
