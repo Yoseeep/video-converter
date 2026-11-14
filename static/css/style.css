@@ -42,6 +42,8 @@ body {
   min-height: 100vh;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+  width: 100%;
 }
 
 .app-container {
@@ -826,32 +828,258 @@ body {
 
 /* Responsive */
 @media (max-width: 768px) {
+  .app-container {
+    padding: 20px 14px 48px;
+    gap: 20px;
+  }
+
   .app-header {
     flex-direction: column;
     align-items: flex-start;
+    gap: 14px;
+    padding-bottom: 18px;
   }
+
+  .brand {
+    gap: 12px;
+  }
+
+  .logo-icon {
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+  }
+
+  .brand-text h1 {
+    font-size: 1.4rem;
+  }
+
+  .header-badges {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* Dropzone */
+  .dropzone {
+    padding: 32px 16px;
+  }
+
+  .dropzone-content h3 {
+    font-size: 1.15rem;
+  }
+
+  .upload-icon-wrapper {
+    width: 58px;
+    height: 58px;
+    margin-bottom: 12px;
+  }
+
+  /* Global Controls */
+  .controls-card {
+    padding: 16px;
+    gap: 14px;
+  }
+
   .controls-header {
     flex-direction: column;
     align-items: stretch;
+    gap: 14px;
   }
+
   .global-config {
     flex-direction: column;
     align-items: stretch;
+    width: 100%;
+    gap: 10px;
   }
+
+  .config-group {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+    gap: 6px;
+  }
+
+  .config-group label {
+    font-size: 0.85rem;
+  }
+
+  .select-wrapper {
+    width: 100%;
+  }
+
+  .select-custom {
+    width: 100%;
+    max-width: 100%;
+    font-size: 0.88rem;
+    padding: 9px 12px;
+    box-sizing: border-box;
+  }
+
+  #toggleAdvancedBtn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .toggle-control {
+    width: 100%;
+    justify-content: flex-start;
+    padding: 6px 2px;
+  }
+
+  /* Actions Group (Convertir todo, Descargar ZIP, Limpiar) */
   .actions-group {
-    justify-content: stretch;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+    gap: 8px;
   }
+
   .actions-group .btn {
-    flex: 1;
+    width: 100%;
+    min-width: 0;
+    justify-content: center;
+    box-sizing: border-box;
+    padding: 11px 16px;
+    font-size: 0.9rem;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    overflow: hidden;
   }
+
+  /* Advanced Panel */
+  .advanced-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  /* Video Cards */
+  .video-card {
+    padding: 14px;
+    gap: 12px;
+  }
+
   .video-card-main {
     flex-direction: column;
     align-items: stretch;
+    gap: 12px;
   }
+
+  .video-file-info {
+    min-width: 0;
+    width: 100%;
+    gap: 10px;
+  }
+
+  .file-details {
+    min-width: 0;
+    flex: 1;
+    overflow: hidden;
+  }
+
   .file-name {
     max-width: 100%;
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
+
+  .conversion-config-bar {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .conversion-config-bar .card-target-select {
+    flex: 1;
+    min-width: 0;
+    width: 100%;
+  }
+
   .card-actions {
-    justify-content: flex-end;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: stretch;
+  }
+
+  .card-actions .btn {
+    flex: 1 1 auto;
+    min-width: 0;
+    justify-content: center;
+    box-sizing: border-box;
+    text-align: center;
+    padding: 9px 12px;
+  }
+
+  .card-actions .btn[title="Eliminar"] {
+    flex: 0 0 40px;
+    padding: 6px;
+    font-size: 1.25rem;
+  }
+
+  /* Progress Bar */
+  .progress-header {
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .progress-status-text {
+    font-size: 0.78rem;
+  }
+
+  .progress-percentage {
+    font-size: 0.78rem;
+  }
+
+  /* Features */
+  .features-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+}
+
+@media (max-width: 480px) {
+  .app-container {
+    padding: 14px 10px 40px;
+  }
+
+  .brand-text h1 {
+    font-size: 1.22rem;
+  }
+
+  .subtitle {
+    font-size: 0.82rem;
+  }
+
+  .controls-card {
+    padding: 12px 14px;
+  }
+
+  .video-card {
+    padding: 12px;
+  }
+
+  .dropzone {
+    padding: 26px 12px;
+  }
+
+  .format-tags {
+    gap: 5px;
+  }
+
+  .format-tag {
+    font-size: 0.72rem;
+    padding: 3px 6px;
+  }
+
+  .modal-dialog {
+    margin: 10px;
   }
 }
