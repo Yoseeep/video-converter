@@ -320,6 +320,30 @@ def run_conversion_job(task_id):
 class VideoConverterHandler(BaseHTTPRequestHandler):
     """Manejador HTTP para la interfaz web y APIs REST."""
 
+    def get_session_id(self):
+        """Identifica de forma aislada la sesión del cliente (por header, query o cookie)."""
+        # 1. Header X-Session-ID (enviado por JavaScript)
+        sess = self.headers.get("X-Session-ID")
+        if sess and sess.strip():
+            return sess.strip()
+        # 2. Parámetro query ?session_id=...
+        parsed = urllib.parse.urlparse(self.path)
+        qs = urllib.parse.parse_qs(parsed.query)
+        if "session_id" in qs and qs["session_id"][0]:
+            return qs["session_id"][0].strip()
+        # 3. Cookie session_id
+        cookie_header = self.headers.get("Cookie", "")
+        if cookie_header:
+            from http.cookies import SimpleCookie
+            try:
+                c = SimpleCookie()
+                c.load(cookie_header)
+                if "session_id" in c:
+                    return c["session_id"].value.strip()
+            except Exception:
+                pass
+        return "default"
+
     def log_message(self, format, *args):
         try:
             # Desactivar logs ruidosos para polling continuo y comprobar tipo seguro
@@ -371,7 +395,13 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/" or path == "/index.html":
-            self.serve_file(TEMPLATES_DIR / "index.html", "text/html; charset=utf-8")
+            cookie_header = self.headers.get("Cookie", "")
+            has_sess = "session_id=" in cookie_header
+            extra_headers = []
+            if not has_sess:
+                new_sess = str(uuid.uuid4())[:12]
+                extra_headers.append(("Set-Cookie", f"session_id={new_sess}; Path=/; SameSite=Lax; Max-Age=2592000"))
+            self.serve_file(TEMPLATES_DIR / "index.html", "text/html; charset=utf-8", extra_headers=extra_headers)
         elif path.startswith("/static/"):
             rel_path = path[len("/static/"):]
             file_path = (STATIC_DIR / rel_path).resolve()
@@ -382,8 +412,9 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
             mime = MIME_TYPES.get(ext, "application/octet-stream")
             self.serve_file(file_path, mime)
         elif path == "/api/tasks":
+            sess_id = self.get_session_id()
             with tasks_lock:
-                task_list = list(tasks.values())
+                task_list = [t for t in tasks.values() if t.get("session_id", "default") == sess_id]
             self.send_json({"tasks": task_list})
         elif path.startswith("/api/tasks/"):
             task_id = path.split("/api/tasks/")[1]
@@ -500,9 +531,11 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
                     bytes_left -= len(chunk)
 
             file_size = input_file.stat().st_size
+            sess_id = self.get_session_id()
 
             task_data = {
                 "id": task_id,
+                "session_id": sess_id,
                 "original_name": safe_name,
                 "input_path": str(input_file),
                 "output_name": output_name,
@@ -564,10 +597,11 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
         self.send_json({"success": True, "task_id": task_id})
 
     def handle_convert_all(self):
+        sess_id = self.get_session_id()
         queued_ids = []
         with tasks_lock:
             for tid, t in tasks.items():
-                if t["status"] in ["queued", "error"]:
+                if t.get("session_id", "default") == sess_id and t["status"] in ["queued", "error"]:
                     queued_ids.append(tid)
 
         for tid in queued_ids:
@@ -576,9 +610,11 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
         self.send_json({"success": True, "count": len(queued_ids)})
 
     def handle_clear_all(self):
+        sess_id = self.get_session_id()
         with tasks_lock:
-            to_delete = list(tasks.values())
-            tasks.clear()
+            to_delete = [t for t in tasks.values() if t.get("session_id", "default") == sess_id]
+            for t in to_delete:
+                tasks.pop(t["id"], None)
 
         for t in to_delete:
             try:
@@ -592,7 +628,7 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
         save_tasks_to_disk()
         self.send_json({"success": True, "message": "Historial limpiado"})
 
-    def serve_file(self, file_path, content_type):
+    def serve_file(self, file_path, content_type, extra_headers=None):
         try:
             with open(file_path, "rb") as f:
                 content = f.read()
@@ -600,6 +636,9 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(content)))
             self.send_header("Cache-Control", "no-cache")
+            if extra_headers:
+                for k, v in extra_headers:
+                    self.send_header(k, v)
             self.end_headers()
             self.wfile.write(content)
         except Exception as e:
@@ -621,12 +660,16 @@ class VideoConverterHandler(BaseHTTPRequestHandler):
             print(f"[Download Error]: {e}", file=sys.stderr)
 
     def serve_zip_all(self):
-        """Genera un archivo ZIP con todos los videos convertidos."""
+        """Genera un archivo ZIP con todos los videos convertidos de la sesión actual."""
+        sess_id = self.get_session_id()
         with tasks_lock:
-            completed_tasks = [t for t in tasks.values() if t["status"] == "completed"]
+            completed_tasks = [
+                t for t in tasks.values()
+                if t.get("status") == "completed" and t.get("session_id", "default") == sess_id
+            ]
 
         if not completed_tasks:
-            self.send_error(400, "No hay archivos convertidos listos para descargar")
+            self.send_error(400, "No hay archivos convertidos listos para descargar en tu sesión")
             return
 
         zip_buffer = io.BytesIO()

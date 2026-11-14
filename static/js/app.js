@@ -27,6 +27,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const previewVideoPlayer = document.getElementById('previewVideoPlayer');
   const modalTitle = document.getElementById('modalTitle');
 
+  // Identificador de sesión único por navegador/dispositivo
+  function getSessionId() {
+    let sid = localStorage.getItem('vc_session_id');
+    if (!sid) {
+      sid = 'sess_' + Math.random().toString(36).substring(2, 10) + '_' + Date.now().toString(36);
+      localStorage.setItem('vc_session_id', sid);
+    }
+    return sid;
+  }
+  const sessionId = getSessionId();
+
   // Estado local
   let tasks = {}; // task_id -> task object
   let pollInterval = null;
@@ -117,15 +128,18 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // Iniciar todas las conversiones pendientes
+  // Iniciar todas las conversiones pendientes de esta sesión
   startAllBtn.addEventListener('click', async () => {
     try {
       startAllBtn.disabled = true;
       const pendingTasks = Object.values(tasks).filter(t => t.status === 'queued' || t.status === 'error');
       
-      // Enviar cada tarea con su formato seleccionado
+      // Enviar cada tarea con su formato seleccionado y session ID
       for (const t of pendingTasks) {
-        await fetch(`/api/convert/${t.id}?target=${t.target_format}`, { method: 'POST' });
+        await fetch(`/api/convert/${t.id}?target=${t.target_format}`, {
+          method: 'POST',
+          headers: { 'X-Session-ID': sessionId }
+        });
         t.status = 'queued';
       }
 
@@ -138,16 +152,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Descargar todo en ZIP
+  // Descargar todo en ZIP para la sesión actual
   downloadZipBtn.addEventListener('click', () => {
-    window.location.href = '/api/download-all';
+    window.location.href = `/api/download-all?session_id=${encodeURIComponent(sessionId)}`;
   });
 
-  // Limpiar lista
+  // Limpiar lista de la sesión actual
   clearAllBtn.addEventListener('click', async () => {
-    if (!confirm('¿Deseas limpiar todos los archivos de la lista?')) return;
+    if (!confirm('¿Deseas limpiar todos los archivos de tu lista?')) return;
     try {
-      await fetch('/api/clear', { method: 'POST' });
+      await fetch('/api/clear', {
+        method: 'POST',
+        headers: { 'X-Session-ID': sessionId }
+      });
       tasks = {};
       stopPolling();
       renderUI();
@@ -175,6 +192,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Crear tarea temporal local mientras sube
     tasks[tempId] = {
       id: tempId,
+      session_id: sessionId,
       original_name: file.name,
       target_format: targetFmt,
       input_size: file.size,
@@ -188,14 +206,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/upload', true);
 
-    // Encabezados con metadatos
+    // Encabezados con metadatos y session ID
     xhr.setRequestHeader('X-Filename', encodeURIComponent(file.name));
     xhr.setRequestHeader('X-Target-Format', targetFmt);
     xhr.setRequestHeader('X-Quality', quality);
     xhr.setRequestHeader('X-Resolution', resolution);
     xhr.setRequestHeader('X-Audio', audio);
-    // Solo iniciar automáticamente si el usuario activó la casilla
     xhr.setRequestHeader('X-Auto-Start', shouldAutoStart ? 'true' : 'false');
+    xhr.setRequestHeader('X-Session-ID', sessionId);
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) {
@@ -242,7 +260,7 @@ document.addEventListener('DOMContentLoaded', () => {
     xhr.send(file);
   }
 
-  // Polling continuo solo mientras haya conversiones activas
+  // Polling continuo solo mientras haya conversiones activas en esta sesión
   function startPolling() {
     if (pollInterval) return;
     pollTasks();
@@ -258,7 +276,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   async function pollTasks() {
     try {
-      const res = await fetch('/api/tasks');
+      const res = await fetch('/api/tasks', {
+        headers: { 'X-Session-ID': sessionId }
+      });
       if (!res.ok) return;
       const data = await res.json();
       
@@ -310,7 +330,7 @@ document.addEventListener('DOMContentLoaded', () => {
       return;
     }
 
-    // Calcular estadísticas globales
+    // Calcular estadísticas globales de la sesión
     let totalSize = 0;
     let completedCount = 0;
     taskIds.forEach(id => {
@@ -539,7 +559,10 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       const task = tasks[taskId];
       const target = task ? task.target_format : 'mp4';
-      await fetch(`/api/convert/${taskId}?target=${target}`, { method: 'POST' });
+      await fetch(`/api/convert/${taskId}?target=${target}`, {
+        method: 'POST',
+        headers: { 'X-Session-ID': sessionId }
+      });
       if (tasks[taskId]) {
         tasks[taskId].status = 'converting';
         tasks[taskId].progress = 0;
@@ -553,7 +576,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   window.deleteTask = async (taskId) => {
     try {
-      await fetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
+      await fetch(`/api/tasks/${taskId}`, {
+        method: 'DELETE',
+        headers: { 'X-Session-ID': sessionId }
+      });
       delete tasks[taskId];
       renderUI();
     } catch (err) {
@@ -580,6 +606,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Cargar tareas existentes al cargar la página
+  // Cargar tareas existentes de esta sesión al cargar la página
   pollTasks();
 });
