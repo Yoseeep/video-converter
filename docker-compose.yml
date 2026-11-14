@@ -1,0 +1,12 @@
+services:
+  video-converter:
+    build: .
+    container_name: video_converter_web
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+    volumes:
+      - ./uploads:/app/uploads
+      - ./converted:/app/converted

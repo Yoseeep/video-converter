@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.DS_Store
+uploads/*
+!uploads/.gitkeep
+converted/*
+!converted/.gitkeep
